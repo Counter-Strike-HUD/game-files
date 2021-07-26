@@ -75,7 +75,7 @@ new iFrame = 0, szWeaponsLastState[ 33 ][ 2 ][ 2 ];
 
 new iReversedMaps[ MAX_REVERSED_MAPS ][ 16 ];
 
-new const VERSION[] = "$VERSION%"
+new const VERSION[] = "%VERSION%"
 
 public plugin_init( ) {
 	register_plugin( "Events Test", VERSION, "Damper" );
