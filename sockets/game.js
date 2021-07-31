@@ -74,6 +74,9 @@ class GameSocket extends Event {
         // Listen for connection
         this.server.on('connection', socket => {
 
+            // Disable packet concating
+            socket.setNoDelay(true);
+
             // Set encoding to utf8
             socket.setEncoding('utf8');
 
@@ -224,7 +227,6 @@ class GameSocket extends Event {
      */
     write(data){
 
-        
             // Check if client socket exists
             if(this.sockets.client !== null){
                 this.sockets.client.write(data);
