@@ -8,8 +8,13 @@
 #include < csx >
 #include < fakemeta_util >
 
+#define PLUGIN_NAME "HudObserver"
 #define CONFIG_FILE	"addons/amxmodx/configs/HudObserverConfig.json"
 #define MAX_REVERSED_MAPS	32
+
+#define RECONNECT_TIME	3.0
+#define RECONNECT_TRIES	10
+#define RECONNECT_TASK	9347
 
 const m_flFlashedUntil = 514;
 const m_flFlashedAt = 515;
@@ -75,22 +80,23 @@ new iFrame = 0, szWeaponsLastState[ 33 ][ 2 ][ 2 ];
 
 new iReversedMaps[ MAX_REVERSED_MAPS ][ 16 ];
 
-new const VERSION[] = "%VERSION%"
+new g_iTries = 0;
 
 public plugin_init( ) {
-	register_plugin( "Events Test", VERSION, "Damper" );
+	register_plugin( "Events Test", "1.0.5b", "Damper" );
 	
 	// Open socket
-	new iError;
-	g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError, SOCK_NON_BLOCKING );
-	
-	if( iError > 0 && iError <= 3 || g_iSocket < 1 ) {
-		switch( iError ) {
-			case 1: server_print( "Couldn't create a socket" );
-			case 2: server_print( "Server unknown" );
-			case 3: server_print( "Error while connecting" );
-			default: server_print( "Couldn't create a socket" );
+	new iError = 0;
+
+	g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError );
+	if( iError > 0 ) {
+		switch ( iError ) {
+			case SOCK_ERROR_CREATE_SOCKET: { server_print( "[%s] Error creating socket", PLUGIN_NAME ); }
+			case SOCK_ERROR_SERVER_UNKNOWN: { server_print( "[%s] Error resolving remote hostname", PLUGIN_NAME ); }
+			case SOCK_ERROR_WHILE_CONNECTING: { server_print( "[%s] Error connecting socket", PLUGIN_NAME ); }
 		}
+		
+		set_task( RECONNECT_TIME, "TryToReconnect", RECONNECT_TASK, .flags = "b" );
 	}
 	
 	g_iMaxPlayers = get_maxplayers( );
@@ -120,6 +126,7 @@ public plugin_init( ) {
 	
 	// Register Ham Module Forwards
 	RegisterHam( Ham_Killed, "player", "fw_HamKilled" );
+	RegisterHam( Ham_TakeDamage, "player", "fw_TakeDamage", 1 );
 	
 	for( new i = 1; i < sizeof WEAPONENTNAMES; i++ ) {
 		if( WEAPONENTNAMES[ i ][ 0 ] ) {
@@ -136,7 +143,6 @@ public plugin_init( ) {
 	// Register events
 	register_event( "BarTime", "fw_BombPlantingStoped", "b", "1=0" );
 	register_event( "CurWeapon", "fw_CurWeapon", "be", "1=1" );
-	register_event( "Damage", "fw_Damage", "b", "2!0", "3=0", "4!0" );
 	register_event( "WeapPickup", "fw_WeaponPickedUp", "be" );
 	register_event( "Money", "fw_Money", "b" );
 	
@@ -207,6 +213,8 @@ public client_authorized( iPlayer ) {
 
 // Buy forward
 public CS_OnBuy( iPlayer, iItem ) {
+	if( iItem != CSI_VEST && iItem != CSI_VESTHELM && iItem != CSI_DEFUSER && iItem != CSI_SHIELD && iItem != CSI_SHIELDGUN && iItem != CSI_NVGS && iItem != CSW_FLASHBANG ) return;
+	
 	static iPrice;
 	iPrice = GetItemPrice( iPlayer, iItem );
 	
@@ -215,18 +223,30 @@ public CS_OnBuy( iPlayer, iItem ) {
 	new szName[ 64 ], szAltName[ 64 ];
 	cs_get_item_alias( iItem, szName, charsmax( szName ), szAltName, charsmax( szAltName ) );
 	
-	new JSON:Object = json_init_object( );
-	
-	json_object_set_string( Object, "event_name", "buy_equipment" );
-	json_object_set_number( Object, "weapon_id", iItem );
-	json_object_set_string( Object, "weapon_buyer", szSteam[ iPlayer ] );
-	json_object_set_number( Object, "weapon_price", iPrice );
-	json_object_set_string( Object, "weapon_name", szName );
-	json_object_set_string( Object, "weapon_altname", szAltName );
-	
-	SendToSocket( Object );
-	
-	json_free( Object );
+	if( iItem == CSW_FLASHBANG ) {
+		if( cs_get_user_bpammo( iPlayer, CSW_FLASHBANG ) == 1 ) {
+			new JSON:Object = json_init_object( );
+			
+			json_object_set_string( Object, "event_name", "pickup_item" );
+			json_object_set_string( Object, "user_id", szSteam[ iPlayer ] );
+			json_object_set_number( Object, "item_id", CSW_FLASHBANG );
+			
+			SendToSocket( Object );
+			
+			json_free( Object );
+		}
+	} else {
+		new JSON:Object = json_init_object( );
+		
+		json_object_set_string( Object, "event_name", "buy_equipment" );
+		json_object_set_number( Object, "weapon_id", iItem );
+		json_object_set_string( Object, "weapon_buyer", szSteam[ iPlayer ] );
+		json_object_set_string( Object, "weapon_name", szName );
+		
+		SendToSocket( Object );
+		
+		json_free( Object );
+	}
 }
 
 // Killed ham
@@ -455,19 +475,43 @@ public fw_CurWeapon( iPlayer ) {
 	return PLUGIN_CONTINUE;
 }
 
-// Switch current weapon
-public fw_Damage( iVictim ) {
-	if( !is_user_alive( iVictim ) ) return PLUGIN_CONTINUE;
+// Fall damage
+public fw_TakeDamage( iVictim, iIdnflictor, iAttacker, Float:iDamage, iDamageBits ) {
+	if( !is_user_connected( iVictim ) ) return PLUGIN_CONTINUE;
 	
 	new iAttacker = get_user_attacker( iVictim );
-	new iDamage = read_data( 2 );
 	
 	new JSON:Object = json_init_object( );
 	
 	json_object_set_string( Object, "event_name", "damage" );
-	json_object_set_number( Object, "weapon_id", get_user_weapon( iAttacker ) );
-	json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
-	json_object_set_number( Object, "health_reduced", iDamage );
+	
+	if( iDamageBits & DMG_BULLET ) {
+		json_object_set_string( Object, "damage_type", "Hit" );
+		json_object_set_number( Object, "weapon_id", get_user_weapon( iAttacker ) );
+		json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
+	} else if( iDamageBits & DMG_GRENADE ) {
+		json_object_set_string( Object, "damage_type", "Grenade" );
+		json_object_set_number( Object, "weapon_id", 4 );
+		json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
+	} else if( iDamageBits & DMG_BLAST ) {
+		json_object_set_string( Object, "damage_type", "C4 Explode" );
+		json_object_set_number( Object, "weapon_id", 6 );
+		json_object_set_string( Object, "attacker_id", szSteam[ iPlantId ] );
+	} else if( iDamageBits & DMG_FALL ) {
+		json_object_set_string( Object, "damage_type", "Fall" );
+		json_object_set_number( Object, "weapon_id", 0 );
+		json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
+	} else if( ( iDamageBits & DMG_DROWN ) || ( iDamageBits & DMG_DROWNRECOVER ) ) {
+		json_object_set_string( Object, "damage_type", "Drown" );
+		json_object_set_number( Object, "weapon_id", 0 );
+		json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
+	} else {
+		json_object_set_string( Object, "damage_type", "Unknown" );
+		json_object_set_number( Object, "weapon_id", get_user_weapon( iAttacker ) );
+		json_object_set_string( Object, "attacker_id", szSteam[ iAttacker ] );
+	}
+	
+	json_object_set_number( Object, "health_reduced", floatround( iDamage ) );
 	json_object_set_number( Object, "health", get_user_health( iVictim ) );
 	json_object_set_string( Object, "victim_id", szSteam[ iVictim ] );
 	
@@ -480,6 +524,8 @@ public fw_Damage( iVictim ) {
 
 // Pickup weapon
 public fw_WeaponPickedUp( iPlayer ) {
+	if( read_data( 1 ) == 6 ) return;
+	
 	new JSON:Object = json_init_object( );
 	
 	json_object_set_string( Object, "event_name", "pickup_item" );
@@ -489,12 +535,12 @@ public fw_WeaponPickedUp( iPlayer ) {
 	SendToSocket( Object );
 	
 	json_free( Object );
-	
-	return PLUGIN_CONTINUE;
 }
 
 // Drop weapon
 public fw_OnItemDropPre( iEnt ) {
+	if( read_data( 1 ) == 6 ) return;
+	
 	new JSON:Object = json_init_object( );
 	
 	json_object_set_string( Object, "event_name", "drop_item" );
@@ -547,6 +593,8 @@ public fw_RoundEnd( iMessageId, iMessageDestination, iMessageEntity ) {
 		RoundWon( 1, 1 );
 	} else if( equal( szMessage, "#CTs_Win" ) ) {
 		RoundWon( 2, 1 );
+	} else if( equal( szMessage, "#Target_Saved" ) ) {
+		RoundWon( 2, 2 );
 	}
 	
 	return PLUGIN_CONTINUE;
@@ -558,7 +606,7 @@ public RoundWon( iTeam, iType ) {
 	
 	json_object_set_string( Object, "event_name", "round_end" );
 	json_object_set_string( Object, "side_win", iTeam == 1 ? "TT" : "CT" );
-	json_object_set_string( Object, "end_type", iType == 1 ? "elimination" : iTeam == 1 ? "c4_exploded" : "c4_defused" );
+	json_object_set_string( Object, "end_type", iType == 1 ? "elimination" : iType == 2 ? "save" :iTeam == 1 ? "c4_exploded" : "c4_defused" );
 	json_object_set_number( Object, "tt_rounds", g_iTeamScore[ 1 ] );
 	json_object_set_number( Object, "ct_rounds", g_iTeamScore[ 0 ] );
 	
@@ -659,6 +707,8 @@ public server_frame( ) {
 					bChange = true;
 				}
 			}
+			
+			szWeapons[ iIterator ] = EOS;
 		}
 	}
 	
@@ -673,18 +723,67 @@ public server_frame( ) {
 	return;
 }
 
+// Reconnect to socket
+public TryToReconnect( ) {
+	g_iTries++;
+	
+	server_print( "[%s] Trying to reconnect", PLUGIN_NAME );
+
+	socket_close( g_iSocket );
+
+	new iError = 0;
+	
+	g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError );
+
+	if( iError > 0 ) {
+		switch( iError ) {
+			case SOCK_ERROR_CREATE_SOCKET: { server_print( "[%s] Error creating socket", PLUGIN_NAME ); }
+			case SOCK_ERROR_SERVER_UNKNOWN: { server_print( "[%s] Error resolving remote hostname", PLUGIN_NAME ); }
+			case SOCK_ERROR_WHILE_CONNECTING: { server_print( "[%s] Error connecting socket", PLUGIN_NAME ); }
+		}
+		
+		if( g_iTries >= RECONNECT_TRIES ) {
+			remove_task( RECONNECT_TASK );
+			
+			g_iTries = 0;
+		}
+	} else {
+		g_iTries = 0;
+		
+		server_print( "[%s] Successfully reconnected", PLUGIN_NAME );
+		
+		remove_task( RECONNECT_TASK );
+	}
+}
+
 // Send info to Game Socket
 stock SendToSocket( JSON:Object ) {
-	if( !g_iSocket ) {
-		server_print( "Socket not created!" );
-		return;
-	}
+	if( !CheckSocket( g_iSocket ) ) return;
 	
 	static szBuffer[ 1024 ];
 	
 	json_serial_to_string( Object, szBuffer, charsmax( szBuffer ), true );
 	
 	socket_send( g_iSocket, szBuffer, charsmax( szBuffer ) );
+}
+
+stock CheckSocket( iSocket ) {
+	if( g_iTries ) return 0;
+	
+	if( socket_is_readable( iSocket, 0 ) ) {
+		static szData[ 2 ];
+		new iBytesReceived = socket_recv( iSocket, szData, charsmax( szData ) );
+		
+		if( !iBytesReceived ) {
+			TryToReconnect( );
+			
+			set_task( RECONNECT_TIME, "TryToReconnect", RECONNECT_TASK, .flags = "b" );
+			
+			return 0;
+		}
+	}
+	
+	return 1;
 }
 
 // Get item price
