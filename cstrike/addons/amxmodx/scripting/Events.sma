@@ -13,7 +13,6 @@
 #define MAX_REVERSED_MAPS	32
 
 #define RECONNECT_TIME	3.0
-#define RECONNECT_TRIES	10
 #define RECONNECT_TASK	9347
 
 const m_flFlashedUntil = 514;
@@ -80,7 +79,9 @@ new iFrame = 0, szWeaponsLastState[ 33 ][ 2 ][ 2 ];
 
 new iReversedMaps[ MAX_REVERSED_MAPS ][ 16 ];
 
-new g_iTries = 0;
+new bConnected = false;
+
+new bool:bDefStatus[ 33 ];
 
 public plugin_init( ) {
 	register_plugin( "Events Test", "1.0.5b", "Damper" );
@@ -89,15 +90,17 @@ public plugin_init( ) {
 	new iError = 0;
 
 	g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError );
-	if( iError > 0 ) {
+	if( iError > 0 || !g_iSocket ) {
 		switch ( iError ) {
 			case SOCK_ERROR_CREATE_SOCKET: { server_print( "[%s] Error creating socket", PLUGIN_NAME ); }
 			case SOCK_ERROR_SERVER_UNKNOWN: { server_print( "[%s] Error resolving remote hostname", PLUGIN_NAME ); }
 			case SOCK_ERROR_WHILE_CONNECTING: { server_print( "[%s] Error connecting socket", PLUGIN_NAME ); }
 		}
 		
-		set_task( RECONNECT_TIME, "TryToReconnect", RECONNECT_TASK, .flags = "b" );
-	}
+		bConnected = false;
+	} else bConnected = true;
+	
+	set_task( RECONNECT_TIME, "TryToReconnect", RECONNECT_TASK, .flags = "b" );
 	
 	g_iMaxPlayers = get_maxplayers( );
 	
@@ -145,6 +148,7 @@ public plugin_init( ) {
 	register_event( "CurWeapon", "fw_CurWeapon", "be", "1=1" );
 	register_event( "WeapPickup", "fw_WeaponPickedUp", "be" );
 	register_event( "Money", "fw_Money", "b" );
+	register_event( "HLTV", "fw_NewRound", "a", "1=0", "2=0" );
 	
 	// Register messages
 	register_message( get_user_msgid( "TeamScore" ), "fw_ScoreUpdate" );
@@ -152,6 +156,7 @@ public plugin_init( ) {
 	
 	// Bomb dropped
 	register_logevent( "fw_BombDropped", 3, "2=Dropped_The_Bomb" );
+	register_logevent( "fw_RoundStart", 2, "1=Round_Start" );
 	
 	// Bomb pick up
 	register_logevent( "fw_BombPickUp", 3, "2=Spawned_With_The_Bomb" );
@@ -230,6 +235,9 @@ public CS_OnBuy( iPlayer, iItem ) {
 			json_object_set_string( Object, "event_name", "pickup_item" );
 			json_object_set_string( Object, "user_id", szSteam[ iPlayer ] );
 			json_object_set_number( Object, "item_id", CSW_FLASHBANG );
+			json_object_set_string( Object, "weapon_type", "other" );
+			json_object_set_number( Object, "current_ammo", 0 );
+			json_object_set_number( Object, "ammo_reserve", 0 );
 			
 			SendToSocket( Object );
 			
@@ -247,6 +255,8 @@ public CS_OnBuy( iPlayer, iItem ) {
 		
 		json_free( Object );
 	}
+	
+	if( iItem == CSI_DEFUSER ) bDefStatus[ iPlayer ] = true;
 }
 
 // Killed ham
@@ -268,6 +278,8 @@ public fw_HamKilled( iVictim, iAttacker, shouldgib ) {
 		SendToSocket( Object );
 		
 		json_free( Object );
+		
+		bDefStatus[ iVictim ] = false;
 	}
 }
 
@@ -299,6 +311,8 @@ public client_death( iAttacker, iVictim, iWeapon, iHitPlace ) {
 	SendToSocket( Object );
 	
 	json_free( Object );
+	
+	bDefStatus[ iVictim ] = false;
 }
 
 // Say command
@@ -526,11 +540,19 @@ public fw_TakeDamage( iVictim, iIdnflictor, iAttacker, Float:iDamage, iDamageBit
 public fw_WeaponPickedUp( iPlayer ) {
 	if( read_data( 1 ) == 6 ) return;
 	
+	new iAmmo, iBpAmmo, iType;
+	
+	get_user_ammo( iPlayer, read_data( 1 ), iAmmo, iBpAmmo );
+	iType = CheckWeapType( read_data( 1 ) );
+	
 	new JSON:Object = json_init_object( );
 	
 	json_object_set_string( Object, "event_name", "pickup_item" );
 	json_object_set_string( Object, "user_id", szSteam[ iPlayer ] );
 	json_object_set_number( Object, "item_id", read_data( 1 ) );
+	json_object_set_string( Object, "weapon_type", ( iType == 1 ) ? "primary" : ( iType == 2 ) ? "secondary" : "other" );
+	json_object_set_number( Object, "current_ammo", iAmmo );
+	json_object_set_number( Object, "ammo_reserve", iBpAmmo );
 	
 	SendToSocket( Object );
 	
@@ -660,6 +682,31 @@ public fw_EmitSound( iEnt, iChannel, const szSample[], Float:fVol, Float:fAttn, 
 	return PLUGIN_CONTINUE;
 }
 
+// New Round
+public fw_NewRound( ) {
+	new JSON:Object = json_init_object( );
+	
+	json_object_set_string( Object, "event_name", "round_start_freeze" );
+	json_object_set_number( Object, "freeze_time", get_cvar_num( "mp_freezetime" ) );
+	
+	SendToSocket( Object );
+	
+	json_free( Object );
+}
+
+// Round Start
+public fw_RoundStart( ) {
+	new JSON:Object = json_init_object( );
+	
+	json_object_set_string( Object, "event_name", "round_start_normal" );
+	json_object_set_number( Object, "round_time", get_cvar_num( "mp_roundtime" ) * 60 );
+	
+	SendToSocket( Object );
+	
+	json_free( Object );
+}
+
+// Update ammo
 public server_frame( ) {
 	iFrame++;
 	
@@ -697,7 +744,7 @@ public server_frame( ) {
 					
 					json_object_set_string( Player, "player_id", szSteam[ iPlayer ] );
 					json_object_set_string( Player, "weapon_type", ( iType == 0 ) ? "primary" : "secondary" );
-					json_object_set_number( Player, "current_ammo",iAmmo );
+					json_object_set_number( Player, "current_ammo", iAmmo );
 					json_object_set_number( Player, "ammo_reserve", iBpAmmo );
 					
 					json_array_append_value( Players, Player );
@@ -720,39 +767,63 @@ public server_frame( ) {
 	json_free( Players );
 	json_free( Object );
 	
+	for( new iPlayer = 1; iPlayer <= g_iMaxPlayers; iPlayer ++ ) {
+		if( !is_user_alive( iPlayer ) || is_user_bot( iPlayer ) )
+			continue;
+		
+		for( iIterator = 0; iIterator < iWeaponsNumber; iIterator ++ ) {
+			if( ( cs_get_user_team( iPlayer ) == CS_TEAM_CT ) && !bDefStatus[ iPlayer ] && cs_get_user_defuse( iPlayer ) ) {
+				new JSON:Object2 = json_init_object( );
+				
+				json_object_set_string( Object2, "event_name", "pickup_item" );
+				json_object_set_string( Object2, "user_id", szSteam[ iPlayer ] );
+				json_object_set_number( Object2, "item_id", CSI_DEFUSER );
+				json_object_set_string( Object2, "weapon_type", "other" );
+				json_object_set_number( Object2, "current_ammo", 0 );
+				json_object_set_number( Object2, "ammo_reserve", 0 );
+				
+				SendToSocket( Object2 );
+				
+				json_free( Object2 );
+				
+				bDefStatus[ iPlayer ] = true;
+			}
+			
+			szWeapons[ iIterator ] = EOS;
+		}
+	}
+	
 	return;
 }
 
 // Reconnect to socket
 public TryToReconnect( ) {
-	g_iTries++;
-	
-	server_print( "[%s] Trying to reconnect", PLUGIN_NAME );
-
-	socket_close( g_iSocket );
-
-	new iError = 0;
-	
-	g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError );
-
-	if( iError > 0 ) {
-		switch( iError ) {
-			case SOCK_ERROR_CREATE_SOCKET: { server_print( "[%s] Error creating socket", PLUGIN_NAME ); }
-			case SOCK_ERROR_SERVER_UNKNOWN: { server_print( "[%s] Error resolving remote hostname", PLUGIN_NAME ); }
-			case SOCK_ERROR_WHILE_CONNECTING: { server_print( "[%s] Error connecting socket", PLUGIN_NAME ); }
-		}
+	if( socket_is_readable( g_iSocket, 0 ) || !bConnected ) {
+		static szData[ 2 ];
+		new iBytesReceived = socket_recv( g_iSocket, szData, charsmax( szData ) );
 		
-		if( g_iTries >= RECONNECT_TRIES ) {
-			remove_task( RECONNECT_TASK );
+		if( !iBytesReceived || !bConnected ) {
+			server_print( "[%s] Trying to reconnect", PLUGIN_NAME );
 			
-			g_iTries = 0;
+			socket_close( g_iSocket );
+			
+			new iError = 0;
+			
+			g_iSocket = socket_open( szHost, iPort, SOCKET_TCP, iError );
+			
+			if( iError > 0 ) {
+				switch( iError ) {
+					case SOCK_ERROR_CREATE_SOCKET: { server_print( "[%s] Error creating socket", PLUGIN_NAME ); }
+					case SOCK_ERROR_SERVER_UNKNOWN: { server_print( "[%s] Error resolving remote hostname", PLUGIN_NAME ); }
+					case SOCK_ERROR_WHILE_CONNECTING: { server_print( "[%s] Error connecting socket", PLUGIN_NAME ); }
+				}
+				
+				bConnected = false;
+			} else {
+				bConnected = true;
+				server_print( "[%s] Successfully reconnected", PLUGIN_NAME );
+			}
 		}
-	} else {
-		g_iTries = 0;
-		
-		server_print( "[%s] Successfully reconnected", PLUGIN_NAME );
-		
-		remove_task( RECONNECT_TASK );
 	}
 }
 
@@ -768,17 +839,12 @@ stock SendToSocket( JSON:Object ) {
 }
 
 stock CheckSocket( iSocket ) {
-	if( g_iTries ) return 0;
-	
 	if( socket_is_readable( iSocket, 0 ) ) {
 		static szData[ 2 ];
 		new iBytesReceived = socket_recv( iSocket, szData, charsmax( szData ) );
 		
 		if( !iBytesReceived ) {
-			TryToReconnect( );
-			
-			set_task( RECONNECT_TIME, "TryToReconnect", RECONNECT_TASK, .flags = "b" );
-			
+			bConnected = false;
 			return 0;
 		}
 	}
