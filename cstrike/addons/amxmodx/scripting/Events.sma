@@ -84,6 +84,7 @@ new bConnected = false;
 new bool:bDefStatus[ 33 ];
 
 new szCaster[ 33 ], iObservedPlayer;
+new bool:bObserverActive = false;
 
 public plugin_init( ) {
 	register_plugin( "Events Test", "1.0.6b", "Damper" );
@@ -141,6 +142,9 @@ public plugin_init( ) {
 	
 	// Register client commands
 	register_clcmd( "say", "fw_Say" );
+	register_clcmd( "amx_observe", "ToogleObserver" );
+	register_clcmd( "chooseteam", "BlockTeamChange" ); 
+	register_clcmd( "jointeam", "BlockTeamChange" );
 	
 	// Register forwards
 	register_forward( FM_EmitSound, "fw_EmitSound" );
@@ -216,6 +220,35 @@ public plugin_precache( ) {
 
 // Close socket on plugin end
 public plugin_end( ) if( g_iSocket ) socket_close( g_iSocket );
+
+// Enable/Disable Observer status
+public ToogleObserver( iPlayer ) {
+	new iObserver = find_player( "c", szCaster );
+	
+	if( iObserver == iPlayer ) {
+		if( is_user_alive( iPlayer ) ) user_silentkill( iPlayer, 1 );
+		
+		cs_set_user_team( iPlayer, CS_TEAM_SPECTATOR );
+		
+		bObserverActive = !bObserverActive;
+		
+		client_print( iPlayer, print_chat, "Observer state: %s", bObserverActive ? "Active" : "Inactive" );
+	} else client_print( iPlayer, print_chat, "You are not an Observer" );
+}
+
+// Block Team Change for Observer
+public BlockTeamChange( iPlayer ) {
+	new iObserver = find_player( "c", szCaster );
+	
+	if( ( iObserver == iPlayer ) && bObserverActive ) {
+		
+		client_print( iPlayer, print_chat, "Team change is blocked when Observer is Active!" );
+		
+		return PLUGIN_HANDLED;
+	}
+	
+	return PLUGIN_CONTINUE;
+}
 
 // Client authorized, get user steam id
 public client_authorized( iPlayer ) {
@@ -779,18 +812,18 @@ public server_frame( ) {
 		
 		for( iIterator = 0; iIterator < iWeaponsNumber; iIterator ++ ) {
 			if( ( cs_get_user_team( iPlayer ) == CS_TEAM_CT ) && !bDefStatus[ iPlayer ] && cs_get_user_defuse( iPlayer ) ) {
-				new JSON:Object2 = json_init_object( );
+				Object = json_init_object( );
 				
-				json_object_set_string( Object2, "event_name", "pickup_item" );
-				json_object_set_string( Object2, "user_id", szSteam[ iPlayer ] );
-				json_object_set_number( Object2, "item_id", CSI_DEFUSER );
-				json_object_set_string( Object2, "weapon_type", "other" );
-				json_object_set_number( Object2, "current_ammo", 0 );
-				json_object_set_number( Object2, "ammo_reserve", 0 );
+				json_object_set_string( Object, "event_name", "pickup_item" );
+				json_object_set_string( Object, "user_id", szSteam[ iPlayer ] );
+				json_object_set_number( Object, "item_id", CSI_DEFUSER );
+				json_object_set_string( Object, "weapon_type", "other" );
+				json_object_set_number( Object, "current_ammo", 0 );
+				json_object_set_number( Object, "ammo_reserve", 0 );
 				
-				SendToSocket( Object2 );
+				SendToSocket( Object );
 				
-				json_free( Object2 );
+				json_free( Object );
 				
 				bDefStatus[ iPlayer ] = true;
 			}
@@ -799,7 +832,7 @@ public server_frame( ) {
 		}
 	}
 	
-	new iObserver = find_player( "cg", szCaster );
+	new iObserver = find_player( "c", szCaster );
 	
 	if( iObserver ) {
 		new iTarget;
@@ -808,7 +841,7 @@ public server_frame( ) {
 		if( iTarget && is_user_alive( iTarget ) && iTarget != iObservedPlayer ) {
 			iObservedPlayer = iTarget;
 			
-			new JSON:Object = json_init_object( );
+			Object = json_init_object( );
 				
 			json_object_set_string( Object, "event_name", "caster_observed_player" );
 			json_object_set_string( Object, "user_observed_id", szSteam[ iObservedPlayer ] );
@@ -818,6 +851,41 @@ public server_frame( ) {
 			json_free( Object );
 		}
 	}
+	
+	Object = json_init_object( );
+	
+	Players = json_init_array( );
+	
+	for( new iPlayer = 1; iPlayer <= g_iMaxPlayers; iPlayer ++ ) {
+		if( !is_user_alive( iPlayer ) || is_user_bot( iPlayer ) )
+			continue;
+		
+		new Float: fOrigin[ 3 ], Float: fAngle[ 3 ];
+		
+		entity_get_vector( iPlayer, EV_VEC_v_angle, fAngle );
+		entity_get_vector( iPlayer, EV_VEC_origin , fOrigin );
+		
+		static JSON:Player;
+		Player = json_init_object( );
+		
+		json_object_set_string( Player, "player_id", szSteam[ iPlayer ] );
+		json_object_set_real( Player, "a", fAngle[ 1 ] );
+		json_object_set_real( Player, "x", fOrigin[ 0 ] );
+		json_object_set_real( Player, "y", fOrigin[ 1 ] );
+		json_object_set_real( Player, "z", fOrigin[ 2 ] );
+		
+		json_array_append_value( Players, Player );
+		
+		json_free( Player );
+	}
+	
+	json_object_set_string( Object, "event_name", "radar_event" );
+	json_object_set_value( Object, "players", Players );
+	
+	SendToSocket( Object );
+	
+	json_free( Players );
+	json_free( Object );
 	
 	return;
 }
@@ -855,7 +923,7 @@ public TryToReconnect( ) {
 
 // Send info to Game Socket
 stock SendToSocket( JSON:Object ) {
-	if( !CheckSocket( g_iSocket ) ) return;
+	if( !CheckSocket( g_iSocket ) || !bObserverActive ) return;
 	
 	static szBuffer[ 1024 ];
 	
