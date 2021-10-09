@@ -83,8 +83,10 @@ new bConnected = false;
 
 new bool:bDefStatus[ 33 ];
 
+new szCaster[ 33 ], iObservedPlayer;
+
 public plugin_init( ) {
-	register_plugin( "Events Test", "1.0.5b", "Damper" );
+	register_plugin( "Events Test", "1.0.6b", "Damper" );
 	
 	// Open socket
 	new iError = 0;
@@ -177,6 +179,8 @@ public plugin_precache( ) {
 		json_array_append_string( MapsWithDescBombOrder, "de_train" );
 		json_array_append_string( MapsWithDescBombOrder, "de_chateau" );
 		
+		json_object_set_string( Config, "casterSteamId", "STEAM_X:X:XXXXXXXXXX" );
+		
 		json_object_set_value( Config, "mapsWithDescBombOrder", MapsWithDescBombOrder );
 		
 		json_serial_to_file( Config, CONFIG_FILE, true );
@@ -203,6 +207,8 @@ public plugin_precache( ) {
 		
 		copy( iReversedMaps[ i ], charsmax( iReversedMaps[ ] ), szMap );
 	}
+	
+	json_object_get_string( Config, "casterSteamId", szCaster, charsmax( szCaster ) );
 	
 	json_free( MapsWithDescBombOrder );
 	json_free( Config );
@@ -699,7 +705,7 @@ public fw_RoundStart( ) {
 	new JSON:Object = json_init_object( );
 	
 	json_object_set_string( Object, "event_name", "round_start_normal" );
-	json_object_set_number( Object, "round_time", get_cvar_num( "mp_roundtime" ) * 60 );
+	json_object_set_number( Object, "round_time", floatround( get_cvar_float( "mp_roundtime" ) * 60 ) );
 	
 	SendToSocket( Object );
 	
@@ -790,6 +796,26 @@ public server_frame( ) {
 			}
 			
 			szWeapons[ iIterator ] = EOS;
+		}
+	}
+	
+	new iObserver = find_player( "cg", szCaster );
+	
+	if( iObserver ) {
+		new iTarget;
+		iTarget = entity_get_int( iObserver, EV_INT_iuser2 );
+		
+		if( iTarget && is_user_alive( iTarget ) && iTarget != iObservedPlayer ) {
+			iObservedPlayer = iTarget;
+			
+			new JSON:Object = json_init_object( );
+				
+			json_object_set_string( Object, "event_name", "caster_observed_player" );
+			json_object_set_string( Object, "user_observed_id", szSteam[ iObservedPlayer ] );
+			
+			SendToSocket( Object );
+			
+			json_free( Object );
 		}
 	}
 	
